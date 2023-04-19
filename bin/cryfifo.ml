@@ -88,39 +88,63 @@ module Stats = struct
     buys_left : Entry.t list;
   }[@@deriving show]
 
+
+  (*goto howto
+   * try to consume buy.vol with sell.vol
+    * if sell.vol < buy.vol then
+      * map buy and append to buys_left
+      * calc win/loss based on buy.price, sell.price and sell.vol
+        * if sold at a loss, return the loss
+        * else return the win
+    * if sell.vol >= buy.vol then
+      * calc win/loss based on buy.price, sell.price and sell.vol
+        * if sold at a loss, add loss to yearly result
+        * else add to yearly win
+        * => add to acc: yearly_results + buys_left
+        * => recursively call aux with acc and { sell with vol - buy.vol }
+
+  *)
   let calc ~pair ~buys ~sells =
     let rec aux acc sell =
       match acc.buys_left with
       | [] -> failwith "No buys left.. something is wrong"
       | buy :: buys_left ->
         assert (Ptime.is_later sell.time ~than:buy.time);
-        begin match acc.yearly_results with
+        let (year, yres), yres_rest = match acc.yearly_results with
           | [] ->
             let year, _, _ = Ptime.to_date sell.time in
-            (*goto howto
-              * try to consume buy.vol with sell.vol
-                * if sell.vol < buy.vol then
-                  * map buy and append to buys_left
-                  * calc win/loss based on buy.price, sell.price and sell.vol
-                    * if sold at a loss, return the loss
-                    * else return the win
-                * if sell.vol >= buy.vol then
-                  * calc win/loss based on buy.price, sell.price and sell.vol
-                    * if sold at a loss, add loss to yearly result
-                    * else add to yearly win
-                    * => add to acc: yearly_results + buys_left
-                    * => recursively call aux with acc and { sell with vol - buy.vol }
-                  
-            *)
-            let wins, losses, buys_left =
-              failwith "todo"
-            in
-            let res = { wins; losses } in
-            let yearly_results = (year, res) :: [] in
-            { acc with yearly_results; buys_left }
+            let yres = { wins = 0.; losses = 0. } in
+            (year, yres), [] 
           | (year, yres) :: yres_rest ->
-            failwith "todo"
-        end
+            let sell_year, _, _ = Ptime.to_date sell.time in
+            if sell_year = year then 
+              (year, yres), yres_rest
+            else
+              let yres = { wins = 0.; losses = 0. } in
+              (sell_year, yres), yres_rest
+        in
+        if sell.vol < buy.vol then
+          let wins, losses =
+            let v = sell.vol *. sell.price -. sell.vol *. buy.price in
+            if v >= 0. then v, 0. else 0., -.v 
+          in
+          let wins, losses = yres.wins +. wins, yres.losses +. losses in
+          let yres = { wins; losses } in
+          let buy = { buy with vol = buy.vol -. sell.vol } in
+          let buys_left = buy :: buys_left in
+          let yearly_results = (year, yres) :: yres_rest in
+          { acc with yearly_results; buys_left }
+        else (* sell.vol >= buy.vol *)
+          let wins, losses =
+            let v = buy.vol *. sell.price -. buy.vol *. buy.price in
+            if v >= 0. then v, 0. else 0., -.v 
+          in
+          let wins, losses = yres.wins +. wins, yres.losses +. losses in
+          let yres = { wins; losses } in
+          let yearly_results = (year, yres) :: yres_rest in
+          let acc = { acc with yearly_results; buys_left } in
+          let sell = { sell with vol = sell.vol -. buy.vol } in
+          aux acc sell
     in
     let buys_left =
       buys |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)

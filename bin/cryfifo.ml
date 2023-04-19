@@ -54,7 +54,7 @@ module Entry = struct
       time : Ptime.t;
       pair : Pair.t;
       typ : Typ.t;
-      cost : float; (*eur*)
+      price : float; (*eur*)
       vol : float; (*crypto*)
     }[@@deriving show]
 
@@ -66,38 +66,79 @@ module Entry = struct
     let time = parse_time @@ r "time" in
     let pair = Pair.of_string @@ r "pair" in
     let typ = Typ.of_string @@ r "type" in
-    let cost = Float.of_string @@ r "cost" in
+    let price = Float.of_string @@ r "price" in
     let vol = Float.of_string @@ r "vol" in
-    { time; pair; typ; cost; vol }
+    { time; pair; typ; price; vol }
   
 end
 
 open Entry.T
 
-(*goto compare time with Ptime.is_earlier*)
+module Stats = struct 
+
+  type yearly_result = {
+    wins : float;
+    losses : float;
+  }[@@deriving show]
+  
+  (*goto acc wins/losses per year*)
+  type t = {
+    pair : Pair.t;
+    yearly_results : (int * yearly_result) list;
+    buys_left : Entry.t list;
+  }[@@deriving show]
+
+  let calc ~pair ~buys ~sells =
+    let rec aux acc sell =
+      match acc.buys_left with
+      | [] -> failwith "No buys left.. something is wrong"
+      | buy :: buys_left ->
+        assert (Ptime.is_later sell.time ~than:buy.time);
+        begin match acc.yearly_results with
+          | [] ->
+            let year, _, _ = Ptime.to_date sell.time in
+            (*goto howto
+              * try to consume buy.vol with sell.vol
+                * if sell.vol < buy.vol then
+                  * map buy and append to buys_left
+                  * calc win/loss based on buy.price, sell.price and sell.vol
+                    * if sold at a loss, return the loss
+                    * else return the win
+                * if sell.vol >= buy.vol then
+                  * calc win/loss based on buy.price, sell.price and sell.vol
+                    * if sold at a loss, add loss to yearly result
+                    * else add to yearly win
+                    * => add to acc: yearly_results + buys_left
+                    * => recursively call aux with acc and { sell with vol - buy.vol }
+                  
+            *)
+            let wins, losses, buys_left =
+              failwith "todo"
+            in
+            let res = { wins; losses } in
+            let yearly_results = (year, res) :: [] in
+            { acc with yearly_results; buys_left }
+          | (year, yres) :: yres_rest ->
+            failwith "todo"
+        end
+    in
+    let buys_left =
+      buys |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
+    in
+    let init = { pair; yearly_results = []; buys_left } in
+    sells
+    |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
+    |> List.fold_left aux init
+
+end
 
 let main () = 
   match Sys.argv |> Array.to_list |> CCList.drop 1 with
-  | csv_path :: year :: pair :: [] ->
-    let year = match year with
-      | "all" -> None
-      | year -> Some (CCInt.of_string_exn year)
-    in
-    let pair = match pair with
-      | "all" -> None
-      | pair -> Some (Pair.of_string pair)
-    in
+  | csv_path :: [] ->
     let entries = 
       csv_path
       |> Csv.Rows.load ~has_header:true 
       |> List.map Entry.of_csv_row
-      |> List.filter (fun e ->
-        let (e_y, _, _) = Ptime.to_date e.time in
-        let is_year = year |> CCOption.for_all (CCInt.equal e_y) in
-        let is_pair = pair |> CCOption.for_all ((=) e.pair) in
-        is_year && is_pair
-      )
-      |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     in
     let entries_per_pair =
       entries
@@ -110,10 +151,13 @@ let main () =
       |> Pair.Map.map List.rev
     in
     entries_per_pair |> Pair.Map.iter (fun pair entries ->
-      Format.printf "----- Entries for %a\n%!" Pair.pp pair;
-      entries
-      |> CCList.to_string Entry.show
-      |> print_endline
+      (* Format.printf "----- Entries for %a\n%!" Pair.pp pair; *)
+      (* entries *)
+      (* |> CCList.to_string Entry.show *)
+      (* |> print_endline *)
+      let buys, sells = entries |> CCList.partition (fun e -> e.typ = `Buy) in
+      let stats = Stats.calc ~pair ~buys ~sells in
+      Format.printf "%a" Stats.pp stats
     )
   | _ ->
     Printf.eprintf "Usage: %s <csv> <year|'all'> <pair|'all'>" (Sys.argv.(0));

@@ -1,14 +1,21 @@
 
 module Pair = struct 
 
-  type t = [ `XZECZEUR | `ADAEUR | `XTZEUR ]
-  [@@deriving show]
+  module T = struct 
+  
+    type t = [ `XZECZEUR | `ADAEUR | `XTZEUR ]
+    [@@deriving show,eq,ord]
+
+  end
+  include T
 
   let of_string = function
     | "XZECZEUR" -> `XZECZEUR
     | "ADAEUR" -> `ADAEUR
     | "XTZEUR" -> `XTZEUR
     | s -> failwith @@ "Error parsing pair: '"^s^"'"
+
+  module Map = CCMap.Make(T)
   
 end
 
@@ -90,10 +97,24 @@ let main () =
         let is_pair = pair |> CCOption.for_all ((=) e.pair) in
         is_year && is_pair
       )
+      |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     in
-    entries
-    |> CCList.to_string Entry.show
-    |> print_endline
+    let entries_per_pair =
+      entries
+      |> List.fold_left (fun acc e ->
+        acc |> Pair.Map.update e.pair (function
+          | None -> Some [e]
+          | Some es -> Some (e::es)
+        )
+      ) Pair.Map.empty
+      |> Pair.Map.map List.rev
+    in
+    entries_per_pair |> Pair.Map.iter (fun pair entries ->
+      Format.printf "----- Entries for %a\n%!" Pair.pp pair;
+      entries
+      |> CCList.to_string Entry.show
+      |> print_endline
+    )
   | _ ->
     Printf.eprintf "Usage: %s <csv> <year|'all'> <pair|'all'>" (Sys.argv.(0));
     exit 1

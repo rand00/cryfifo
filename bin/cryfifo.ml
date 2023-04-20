@@ -1,37 +1,4 @@
 
-module Pair = struct 
-
-  module T = struct 
-  
-    type t = [ `XZECZEUR | `ADAEUR | `XTZEUR ]
-    [@@deriving show,eq,ord]
-
-  end
-  include T
-
-  let of_string = function
-    | "XZECZEUR" -> `XZECZEUR
-    | "ADAEUR" -> `ADAEUR
-    | "XTZEUR" -> `XTZEUR
-    | s -> failwith @@ "Error parsing pair: '"^s^"'"
-
-  module Map = CCMap.Make(T)
-  
-end
-
-
-module Typ = struct 
-
-  type t = [ `Buy | `Sell ]
-  [@@deriving show]
-
-  let of_string = function
-    | "buy" -> `Buy
-    | "sell" -> `Sell
-    | s -> failwith @@ "Error parsing typ: '"^s^"'"
-
-end
-
 (*example value: 2020-03-14 18:06:46.2255*)
 let parse_time str =
   let split = CCString.split_on_char in
@@ -46,13 +13,50 @@ let parse_time str =
   Ptime.of_date_time (date, (time, tz))
   |> CCOption.get_exn_or "Ptime error"
 
-module Entry = struct 
+module Asset = struct 
+
+  module T = struct 
+
+    type t = [ `XTZ | `ZEUR | `ADA ]
+    [@@deriving show,eq,ord]
+
+  end
+  include T
+
+  let of_string = function
+    | "XTZ" -> Some `XTZ
+    | "ZEUR" -> Some `ZEUR
+    | _ -> None
+
+  let of_asset_pair_string = function
+    | "XZECZEUR" -> `ZEUR
+    | "ADAEUR" -> `ADA
+    | "XTZEUR" -> `XTZ
+    | s -> failwith @@ "Error parsing pair: '"^s^"'"
+
+  module Map = CCMap.Make(T)
+
+end
+
+module TradeEntry = struct 
+
+  module Typ = struct 
+
+    type t = [ `Buy | `Sell ]
+    [@@deriving show]
+
+    let of_string = function
+      | "buy" -> `Buy
+      | "sell" -> `Sell
+      | s -> failwith @@ "Error parsing typ: '"^s^"'"
+
+  end
 
   module T = struct 
   
     type t = {
       time : Ptime.t;
-      pair : Pair.t;
+      pair : Asset.t;
       typ : Typ.t;
       price : float; (*eur*)
       fee : float; (*eur*)
@@ -66,7 +70,7 @@ module Entry = struct
   let of_csv_row row =
     let r k = Csv.Row.find row k in
     let time = parse_time @@ r "time" in
-    let pair = Pair.of_string @@ r "pair" in
+    let pair = Asset.of_asset_pair_string @@ r "pair" in
     let typ = Typ.of_string @@ r "type" in
     let price = Float.of_string @@ r "price" in
     let fee = Float.of_string @@ r "fee" in
@@ -76,7 +80,46 @@ module Entry = struct
   
 end
 
-open Entry.T
+open TradeEntry.T
+
+module LedgerEntry = struct 
+
+  module Typ = struct 
+
+    type t = [ `Margin | `Rollover ]
+    [@@deriving show]
+
+    let of_string = function
+      | "margin" -> Some `Margin
+      | "rollover" -> Some `Rollover
+      | _ -> None
+
+  end
+
+  module T = struct 
+  
+    type t = {
+      time : Ptime.t;
+      typ : Typ.t;
+      asset : Asset.t;
+      fee : float; (*eur*)
+      refid : string; (*for sanity-checking*)
+    }[@@deriving show]
+
+  end
+  include T
+
+  let of_csv_row row =
+    let open CCOption.Infix in
+    let r k = Csv.Row.find row k in
+    r "type" |> Typ.of_string >>= fun typ -> 
+    r "asset" |> Asset.of_string >>= fun asset -> 
+    let time = parse_time @@ r "time" in
+    let fee = Float.of_string @@ r "fee" in
+    let refid = r "refid" in
+    Some { time; typ; asset; fee; refid }
+  
+end
 
 module IntMap = struct
   include CCMap.Make(CCInt)
@@ -95,9 +138,9 @@ module Stats = struct
   }[@@deriving show]
   
   type t = {
-    pair : Pair.t;
+    pair : Asset.t;
     yearly_results : yearly_result IntMap.t;
-    buys_left : Entry.t list;
+    buys_left : TradeEntry.t list;
   }[@@deriving show]
 
   let update_yearly_results ~year ~wins ~losses v =
@@ -108,14 +151,15 @@ module Stats = struct
         Some { wins; losses }
     )
 
-  let calc ~pair ~buys ~sells =
+  let calc ~pair ~(buys:TradeEntry.t list) ~sells =
+    let open TradeEntry.T in
     let rec aux acc sell =
       match acc.buys_left with
       | [] ->
         (*Note: this can happen if staking gave extra volume*)
         Format.eprintf "WARNING: There is no buys left for %a - \
                         selling pot. staked volume %.2f eur\n%!"
-          Pair.pp pair
+          Asset.pp pair
           (sell.vol *. sell.price);
         let year = year_of_time sell.time in
         let wins, losses = sell.vol *. sell.price, 0. in
@@ -136,7 +180,7 @@ module Stats = struct
                           registering sell as win %a\n%!"
             Ptime.pp sell.time 
             Ptime.pp buy.time 
-            Entry.pp buy;
+            TradeEntry.pp buy;
           let year = year_of_time sell.time in
           let wins, losses = sell.vol *. sell.price, 0. in
           let yearly_results =
@@ -190,30 +234,32 @@ end
 let main () = 
   match Sys.argv |> Array.to_list |> CCList.drop 1 with
   | trades_csv :: [] ->
-    let entries = 
+    let trade_entries = 
       trades_csv
       |> Csv.Rows.load ~has_header:true 
-      |> List.map Entry.of_csv_row
+      |> List.map TradeEntry.of_csv_row
       |> List.filter (fun e -> e.margin = 0.)
       (*< Note: margin-trade gains should be calculated from ledger instead*)
     in
-    let entries_per_pair =
-      entries
+    let trade_entries_per_pair =
+      trade_entries
       |> List.fold_left (fun acc e ->
-        acc |> Pair.Map.update e.pair (function
+        acc |> Asset.Map.update e.pair (function
           | None -> Some [e]
           | Some es -> Some (e::es)
         )
-      ) Pair.Map.empty
+      ) Asset.Map.empty
     in
-    entries_per_pair |> Pair.Map.iter (fun pair entries ->
+    trade_entries_per_pair |> Asset.Map.iter (fun pair trade_entries ->
       (* begin *)
-      (*   Format.printf "\n\n----- Entries for %a\n%!" Pair.pp pair; *)
-      (*   entries *)
-      (*   |> CCList.to_string Entry.show *)
+      (*   Format.printf "\n\n----- Trade_Entries for %a\n%!" Pair.pp pair; *)
+      (*   trade_entries *)
+      (*   |> CCList.to_string TradeEntry.show *)
       (*   |> print_endline *)
       (* end; *)
-      let buys, sells = entries |> CCList.partition (fun e -> e.typ = `Buy) in
+      let buys, sells =
+        trade_entries |> CCList.partition (fun e -> e.typ = `Buy)
+      in
       let stats = Stats.calc ~pair ~buys ~sells in
       Format.printf "\n%a\n%!" Stats.pp stats
     )

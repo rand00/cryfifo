@@ -55,6 +55,7 @@ module Entry = struct
       pair : Pair.t;
       typ : Typ.t;
       price : float; (*eur*)
+      fee : float; (*eur*)
       vol : float; (*crypto*)
     }[@@deriving show]
 
@@ -67,8 +68,9 @@ module Entry = struct
     let pair = Pair.of_string @@ r "pair" in
     let typ = Typ.of_string @@ r "type" in
     let price = Float.of_string @@ r "price" in
+    let fee = Float.of_string @@ r "fee" in
     let vol = Float.of_string @@ r "vol" in
-    { time; pair; typ; price; vol }
+    { time; pair; typ; price; fee; vol }
   
 end
 
@@ -146,7 +148,10 @@ module Stats = struct
           in
           if sell.vol < buy.vol then
             let wins, losses =
-              let v = sell.vol *. sell.price -. sell.vol *. buy.price in
+              let v = 
+                sell.vol *. sell.price 
+                -. (sell.vol *. buy.price +. buy.fee) 
+              in
               if v >= 0. then v, 0. else 0., -.v 
             in
             let wins, losses = yres.wins +. wins, yres.losses +. losses in
@@ -157,7 +162,10 @@ module Stats = struct
             { acc with yearly_results; buys_left }
           else (* sell.vol >= buy.vol *)
             let wins, losses =
-              let v = buy.vol *. sell.price -. buy.vol *. buy.price in
+              let v =
+                buy.vol *. sell.price
+                -. (buy.vol *. buy.price +. buy.fee)
+              in
               if v >= 0. then v, 0. else 0., -.v 
             in
             let wins, losses = yres.wins +. wins, yres.losses +. losses in

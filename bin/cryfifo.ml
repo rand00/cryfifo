@@ -78,6 +78,15 @@ end
 
 open Entry.T
 
+module IntMap = struct
+  include CCMap.Make(CCInt)
+  let pp pp_v = pp CCInt.pp pp_v
+end
+
+let year_of_time t =
+  let y, _, _ = Ptime.to_date t in
+  y
+
 module Stats = struct 
 
   type yearly_result = {
@@ -85,10 +94,9 @@ module Stats = struct
     losses : float;
   }[@@deriving show]
   
-  (*goto acc wins/losses per year*)
   type t = {
     pair : Pair.t;
-    yearly_results : (int * yearly_result) list;
+    yearly_results : yearly_result IntMap.t;
     buys_left : Entry.t list;
   }[@@deriving show]
 
@@ -105,6 +113,14 @@ module Stats = struct
         let yres' = { wins = 0.; losses = 0. } in
         (sell_year, yres'), yres_all
 
+  let update_yearly_results ~year ~wins ~losses v =
+    v |> IntMap.update year (function
+      | None -> Some { wins; losses }
+      | Some yres -> 
+        let wins, losses = yres.wins +. wins, yres.losses in
+        Some { wins; losses }
+    )
+
   let calc ~pair ~buys ~sells =
     let rec aux acc sell =
       match acc.buys_left with
@@ -114,13 +130,12 @@ module Stats = struct
                         selling pot. staked volume %.2f eur\n%!"
           Pair.pp pair
           (sell.vol *. sell.price);
-        let (year, yres), yres_rest =
-          increment_yearly_results sell.time acc.yearly_results
+        let year = year_of_time sell.time in
+        let wins, losses = sell.vol *. sell.price, 0. in
+        let yearly_results =
+          acc.yearly_results
+          |> update_yearly_results ~year ~wins ~losses
         in
-        let wins = sell.vol *. sell.price in
-        let wins, losses = yres.wins +. wins, yres.losses in
-        let yres = { wins; losses } in
-        let yearly_results = (year, yres) :: yres_rest in
         { acc with yearly_results }
       | buy :: buys_left ->
         (*goto problem with staking:
@@ -135,44 +150,42 @@ module Stats = struct
             Ptime.pp sell.time 
             Ptime.pp buy.time 
             Entry.pp buy;
-          (*> goto make this block-piece of boilerplate reuseable*)
-          let (year, yres), yres_rest =
-            increment_yearly_results sell.time acc.yearly_results
+          let year = year_of_time sell.time in
+          let wins, losses = sell.vol *. sell.price, 0. in
+          let yearly_results =
+            acc.yearly_results
+            |> update_yearly_results ~year ~wins ~losses
           in
-          let wins = sell.vol *. sell.price in
-          let wins, losses = yres.wins +. wins, yres.losses in
-          let yres = { wins; losses } in
-          let yearly_results = (year, yres) :: yres_rest in
           { acc with yearly_results }
         ) else 
-          let (year, yres), yres_rest =
-            increment_yearly_results sell.time acc.yearly_results
-          in
+          let year = year_of_time sell.time in
           if sell.vol < buy.vol then
-            let wins, losses =
-              let v = 
-                sell.vol *. sell.price 
-                -. (sell.vol *. buy.price +. buy.fee) 
-              in
-              if v >= 0. then v, 0. else 0., -.v 
-            in
-            let wins, losses = yres.wins +. wins, yres.losses +. losses in
-            let yres = { wins; losses } in
             let buy = { buy with vol = buy.vol -. sell.vol } in
             let buys_left = buy :: buys_left in
-            let yearly_results = (year, yres) :: yres_rest in
+            let yearly_results =
+              let wins, losses =
+                let v = 
+                  sell.vol *. sell.price 
+                  -. (sell.vol *. buy.price +. buy.fee) 
+                in
+                if v >= 0. then v, 0. else 0., -.v 
+              in
+              acc.yearly_results
+              |> update_yearly_results ~year ~wins ~losses
+            in
             { acc with yearly_results; buys_left }
           else (* sell.vol >= buy.vol *)
-            let wins, losses =
-              let v =
-                buy.vol *. sell.price
-                -. (buy.vol *. buy.price +. buy.fee)
+            let yearly_results =
+              let wins, losses =
+                let v =
+                  buy.vol *. sell.price
+                  -. (buy.vol *. buy.price +. buy.fee)
+                in
+                if v >= 0. then v, 0. else 0., -.v 
               in
-              if v >= 0. then v, 0. else 0., -.v 
+              acc.yearly_results
+              |> update_yearly_results ~year ~wins ~losses
             in
-            let wins, losses = yres.wins +. wins, yres.losses +. losses in
-            let yres = { wins; losses } in
-            let yearly_results = (year, yres) :: yres_rest in
             let acc = { acc with yearly_results; buys_left } in
             let sell = { sell with vol = sell.vol -. buy.vol } in
             aux acc sell
@@ -180,7 +193,7 @@ module Stats = struct
     let buys_left =
       buys |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     in
-    let init = { pair; yearly_results = []; buys_left } in
+    let init = { pair; yearly_results = IntMap.empty; buys_left } in
     sells
     |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     |> List.fold_left aux init

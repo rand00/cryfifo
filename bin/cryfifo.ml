@@ -88,28 +88,36 @@ module Stats = struct
     buys_left : Entry.t list;
   }[@@deriving show]
 
-  (*goto howto
-   * try to consume buy.vol with sell.vol
-    * if sell.vol < buy.vol then
-      * map buy and append to buys_left
-      * calc win/loss based on buy.price, sell.price and sell.vol
-        * if sold at a loss, return the loss
-        * else return the win
-    * if sell.vol >= buy.vol then
-      * calc win/loss based on buy.price, sell.price and sell.vol
-        * if sold at a loss, add loss to yearly result
-        * else add to yearly win
-        * => add to acc: yearly_results + buys_left
-        * => recursively call aux with acc and { sell with vol - buy.vol }
-  *)
+  let increment_yearly_results sell_time = function
+    | [] ->
+      let year, _, _ = Ptime.to_date sell_time in
+      let yres = { wins = 0.; losses = 0. } in
+      (year, yres), []
+    | (year, yres) :: yres_rest as yres_all ->
+      let sell_year, _, _ = Ptime.to_date sell_time in
+      if sell_year = year then 
+        (year, yres), yres_rest
+      else
+        let yres' = { wins = 0.; losses = 0. } in
+        (sell_year, yres'), yres_all
+
   let calc ~pair ~buys ~sells =
     let rec aux acc sell =
       match acc.buys_left with
       | [] ->
         (*Note: this can happen if staking gave extra volume*)
-        Format.eprintf "WARNING: There is no buys left for %a\n%!"
-          Pair.pp pair;
-        acc
+        Format.eprintf "WARNING: There is no buys left for %a - \
+                        selling pot. staked volume %.2f eur\n%!"
+          Pair.pp pair
+          (sell.vol *. sell.price);
+        let (year, yres), yres_rest =
+          increment_yearly_results sell.time acc.yearly_results
+        in
+        let wins = sell.vol *. sell.price in
+        let wins, losses = yres.wins +. wins, yres.losses in
+        let yres = { wins; losses } in
+        let yearly_results = (year, yres) :: yres_rest in
+        { acc with yearly_results }
       | buy :: buys_left ->
         (*goto problem with staking:
           * if selling more than buying, because of gains of staking
@@ -117,22 +125,24 @@ module Stats = struct
               * which leads to this assertion to fail
         *)
         (* assert (Ptime.is_later sell.time ~than:buy.time); *)
-        if Ptime.is_later sell.time ~than:buy.time then
-          let acc = { acc with buys_left } in
-          aux acc sell
-        else 
-          let (year, yres), yres_rest = match acc.yearly_results with
-            | [] ->
-              let year, _, _ = Ptime.to_date sell.time in
-              let yres = { wins = 0.; losses = 0. } in
-              (year, yres), [] 
-            | (year, yres) :: yres_rest ->
-              let sell_year, _, _ = Ptime.to_date sell.time in
-              if sell_year = year then 
-                (year, yres), yres_rest
-              else
-                let yres = { wins = 0.; losses = 0. } in
-                (sell_year, yres), yres_rest
+        if Ptime.is_earlier sell.time ~than:buy.time then (
+          Format.eprintf "WARNING: sell time (%a) is earlier than buy time (%a) \
+                          registering sell as win %a\n%!"
+            Ptime.pp sell.time 
+            Ptime.pp buy.time 
+            Entry.pp buy;
+          (*> goto make this block-piece of boilerplate reuseable*)
+          let (year, yres), yres_rest =
+            increment_yearly_results sell.time acc.yearly_results
+          in
+          let wins = sell.vol *. sell.price in
+          let wins, losses = yres.wins +. wins, yres.losses in
+          let yres = { wins; losses } in
+          let yearly_results = (year, yres) :: yres_rest in
+          { acc with yearly_results }
+        ) else 
+          let (year, yres), yres_rest =
+            increment_yearly_results sell.time acc.yearly_results
           in
           if sell.vol < buy.vol then
             let wins, losses =
@@ -183,18 +193,17 @@ let main () =
           | Some es -> Some (e::es)
         )
       ) Pair.Map.empty
-      |> Pair.Map.map List.rev
     in
     entries_per_pair |> Pair.Map.iter (fun pair entries ->
-      begin
-        Format.printf "\n\n----- Entries for %a\n%!" Pair.pp pair;
-        entries
-        |> CCList.to_string Entry.show
-        |> print_endline
-      end;
+      (* begin *)
+      (*   Format.printf "\n\n----- Entries for %a\n%!" Pair.pp pair; *)
+      (*   entries *)
+      (*   |> CCList.to_string Entry.show *)
+      (*   |> print_endline *)
+      (* end; *)
       let buys, sells = entries |> CCList.partition (fun e -> e.typ = `Buy) in
       let stats = Stats.calc ~pair ~buys ~sells in
-      Format.printf "\n%a" Stats.pp stats
+      Format.printf "\n%a\n%!" Stats.pp stats
     )
   | _ ->
     Printf.eprintf "Usage: %s <csv> <year|'all'> <pair|'all'>" (Sys.argv.(0));

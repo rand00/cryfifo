@@ -56,6 +56,7 @@ module Entry = struct
       typ : Typ.t;
       price : float; (*eur*)
       fee : float; (*eur*)
+      margin : float; (*eur*)
       vol : float; (*crypto*)
     }[@@deriving show]
 
@@ -69,8 +70,9 @@ module Entry = struct
     let typ = Typ.of_string @@ r "type" in
     let price = Float.of_string @@ r "price" in
     let fee = Float.of_string @@ r "fee" in
+    let margin = Float.of_string @@ r "margin" in
     let vol = Float.of_string @@ r "vol" in
-    { time; pair; typ; price; fee; vol }
+    { time; pair; typ; price; fee; margin; vol }
   
 end
 
@@ -187,11 +189,13 @@ end
 
 let main () = 
   match Sys.argv |> Array.to_list |> CCList.drop 1 with
-  | csv_path :: [] ->
+  | trades_csv :: [] ->
     let entries = 
-      csv_path
+      trades_csv
       |> Csv.Rows.load ~has_header:true 
       |> List.map Entry.of_csv_row
+      |> List.filter (fun e -> e.margin = 0.)
+      (*< Note: margin-trade gains should be calculated from ledger instead*)
     in
     let entries_per_pair =
       entries

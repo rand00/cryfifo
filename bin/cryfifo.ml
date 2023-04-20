@@ -100,19 +100,6 @@ module Stats = struct
     buys_left : Entry.t list;
   }[@@deriving show]
 
-  let increment_yearly_results sell_time = function
-    | [] ->
-      let year, _, _ = Ptime.to_date sell_time in
-      let yres = { wins = 0.; losses = 0. } in
-      (year, yres), []
-    | (year, yres) :: yres_rest as yres_all ->
-      let sell_year, _, _ = Ptime.to_date sell_time in
-      if sell_year = year then 
-        (year, yres), yres_rest
-      else
-        let yres' = { wins = 0.; losses = 0. } in
-        (sell_year, yres'), yres_all
-
   let update_yearly_results ~year ~wins ~losses v =
     v |> IntMap.update year (function
       | None -> Some { wins; losses }
@@ -162,27 +149,27 @@ module Stats = struct
           if sell.vol < buy.vol then
             let buy = { buy with vol = buy.vol -. sell.vol } in
             let buys_left = buy :: buys_left in
-            let yearly_results =
-              let wins, losses =
-                let v = 
-                  sell.vol *. sell.price 
-                  -. (sell.vol *. buy.price +. buy.fee) 
-                in
-                if v >= 0. then v, 0. else 0., -.v 
+            let wins, losses =
+              let v = 
+                sell.vol *. sell.price 
+                -. (sell.vol *. buy.price +. buy.fee) 
               in
+              if v >= 0. then v, 0. else 0., -.v 
+            in
+            let yearly_results =
               acc.yearly_results
               |> update_yearly_results ~year ~wins ~losses
             in
             { acc with yearly_results; buys_left }
           else (* sell.vol >= buy.vol *)
-            let yearly_results =
-              let wins, losses =
-                let v =
-                  buy.vol *. sell.price
-                  -. (buy.vol *. buy.price +. buy.fee)
-                in
-                if v >= 0. then v, 0. else 0., -.v 
+            let wins, losses =
+              let v =
+                buy.vol *. sell.price
+                -. (buy.vol *. buy.price +. buy.fee)
               in
+              if v >= 0. then v, 0. else 0., -.v 
+            in
+            let yearly_results =
               acc.yearly_results
               |> update_yearly_results ~year ~wins ~losses
             in

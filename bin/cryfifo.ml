@@ -88,7 +88,6 @@ module Stats = struct
     buys_left : Entry.t list;
   }[@@deriving show]
 
-
   (*goto howto
    * try to consume buy.vol with sell.vol
     * if sell.vol < buy.vol then
@@ -102,49 +101,61 @@ module Stats = struct
         * else add to yearly win
         * => add to acc: yearly_results + buys_left
         * => recursively call aux with acc and { sell with vol - buy.vol }
-
   *)
   let calc ~pair ~buys ~sells =
     let rec aux acc sell =
       match acc.buys_left with
-      | [] -> failwith "No buys left.. something is wrong"
+      | [] ->
+        (*Note: this can happen if staking gave extra volume*)
+        Format.eprintf "WARNING: There is no buys left for %a\n%!"
+          Pair.pp pair;
+        acc
       | buy :: buys_left ->
-        assert (Ptime.is_later sell.time ~than:buy.time);
-        let (year, yres), yres_rest = match acc.yearly_results with
-          | [] ->
-            let year, _, _ = Ptime.to_date sell.time in
-            let yres = { wins = 0.; losses = 0. } in
-            (year, yres), [] 
-          | (year, yres) :: yres_rest ->
-            let sell_year, _, _ = Ptime.to_date sell.time in
-            if sell_year = year then 
-              (year, yres), yres_rest
-            else
-              let yres = { wins = 0.; losses = 0. } in
-              (sell_year, yres), yres_rest
-        in
-        if sell.vol < buy.vol then
-          let wins, losses =
-            let v = sell.vol *. sell.price -. sell.vol *. buy.price in
-            if v >= 0. then v, 0. else 0., -.v 
-          in
-          let wins, losses = yres.wins +. wins, yres.losses +. losses in
-          let yres = { wins; losses } in
-          let buy = { buy with vol = buy.vol -. sell.vol } in
-          let buys_left = buy :: buys_left in
-          let yearly_results = (year, yres) :: yres_rest in
-          { acc with yearly_results; buys_left }
-        else (* sell.vol >= buy.vol *)
-          let wins, losses =
-            let v = buy.vol *. sell.price -. buy.vol *. buy.price in
-            if v >= 0. then v, 0. else 0., -.v 
-          in
-          let wins, losses = yres.wins +. wins, yres.losses +. losses in
-          let yres = { wins; losses } in
-          let yearly_results = (year, yres) :: yres_rest in
-          let acc = { acc with yearly_results; buys_left } in
-          let sell = { sell with vol = sell.vol -. buy.vol } in
+        (*goto problem with staking:
+          * if selling more than buying, because of gains of staking
+            * then sells can 'overtake' buys
+              * which leads to this assertion to fail
+        *)
+        (* assert (Ptime.is_later sell.time ~than:buy.time); *)
+        if Ptime.is_later sell.time ~than:buy.time then
+          let acc = { acc with buys_left } in
           aux acc sell
+        else 
+          let (year, yres), yres_rest = match acc.yearly_results with
+            | [] ->
+              let year, _, _ = Ptime.to_date sell.time in
+              let yres = { wins = 0.; losses = 0. } in
+              (year, yres), [] 
+            | (year, yres) :: yres_rest ->
+              let sell_year, _, _ = Ptime.to_date sell.time in
+              if sell_year = year then 
+                (year, yres), yres_rest
+              else
+                let yres = { wins = 0.; losses = 0. } in
+                (sell_year, yres), yres_rest
+          in
+          if sell.vol < buy.vol then
+            let wins, losses =
+              let v = sell.vol *. sell.price -. sell.vol *. buy.price in
+              if v >= 0. then v, 0. else 0., -.v 
+            in
+            let wins, losses = yres.wins +. wins, yres.losses +. losses in
+            let yres = { wins; losses } in
+            let buy = { buy with vol = buy.vol -. sell.vol } in
+            let buys_left = buy :: buys_left in
+            let yearly_results = (year, yres) :: yres_rest in
+            { acc with yearly_results; buys_left }
+          else (* sell.vol >= buy.vol *)
+            let wins, losses =
+              let v = buy.vol *. sell.price -. buy.vol *. buy.price in
+              if v >= 0. then v, 0. else 0., -.v 
+            in
+            let wins, losses = yres.wins +. wins, yres.losses +. losses in
+            let yres = { wins; losses } in
+            let yearly_results = (year, yres) :: yres_rest in
+            let acc = { acc with yearly_results; buys_left } in
+            let sell = { sell with vol = sell.vol -. buy.vol } in
+            aux acc sell
     in
     let buys_left =
       buys |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
@@ -175,13 +186,15 @@ let main () =
       |> Pair.Map.map List.rev
     in
     entries_per_pair |> Pair.Map.iter (fun pair entries ->
-      (* Format.printf "----- Entries for %a\n%!" Pair.pp pair; *)
-      (* entries *)
-      (* |> CCList.to_string Entry.show *)
-      (* |> print_endline *)
+      begin
+        Format.printf "\n\n----- Entries for %a\n%!" Pair.pp pair;
+        entries
+        |> CCList.to_string Entry.show
+        |> print_endline
+      end;
       let buys, sells = entries |> CCList.partition (fun e -> e.typ = `Buy) in
       let stats = Stats.calc ~pair ~buys ~sells in
-      Format.printf "%a" Stats.pp stats
+      Format.printf "\n%a" Stats.pp stats
     )
   | _ ->
     Printf.eprintf "Usage: %s <csv> <year|'all'> <pair|'all'>" (Sys.argv.(0));

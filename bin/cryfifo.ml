@@ -17,19 +17,27 @@ module Asset = struct
 
   module T = struct 
 
-    type t = [ `XTZ | `ZEUR | `ADA ]
+    (*goto define more asset types*)
+    type t = [ `XTZ | `ZEUR | `ADA | `XZEC ]
     [@@deriving show,eq,ord]
 
   end
   include T
 
-  let of_string = function
+  let of_string : string -> t option = function
+    | "XZEC" -> Some `XZEC
     | "XTZ" -> Some `XTZ
+    | "ADA" -> Some `ADA
     | "ZEUR" -> Some `ZEUR
     | _ -> None
 
-  let of_asset_pair_string = function
-    | "XZECZEUR" -> `ZEUR
+  (*goto - currently only trades from crypto->eur is supported
+    .. generally should support any pair,
+    .. and transformation to a base currency
+       .. which for correctness would need to be looked up from a timeseries
+  *)
+  let of_asset_pair_string : string -> t = function
+    | "XZECZEUR" -> `XZEC
     | "ADAEUR" -> `ADA
     | "XTZEUR" -> `XTZ
     | s -> failwith @@ "Error parsing pair: '"^s^"'"
@@ -56,7 +64,7 @@ module TradeEntry = struct
   
     type t = {
       time : Ptime.t;
-      pair : Asset.t;
+      asset : Asset.t;
       typ : Typ.t;
       price : float; (*eur*)
       fee : float; (*eur*)
@@ -70,13 +78,13 @@ module TradeEntry = struct
   let of_csv_row row =
     let r k = Csv.Row.find row k in
     let time = parse_time @@ r "time" in
-    let pair = Asset.of_asset_pair_string @@ r "pair" in
+    let asset = Asset.of_asset_pair_string @@ r "pair" in
     let typ = Typ.of_string @@ r "type" in
     let price = Float.of_string @@ r "price" in
     let fee = Float.of_string @@ r "fee" in
     let margin = Float.of_string @@ r "margin" in
     let vol = Float.of_string @@ r "vol" in
-    { time; pair; typ; price; fee; margin; vol }
+    { time; asset; typ; price; fee; margin; vol }
   
 end
 
@@ -102,6 +110,7 @@ module LedgerEntry = struct
       time : Ptime.t;
       typ : Typ.t;
       asset : Asset.t;
+      amount : float; (*eur*)
       fee : float; (*eur*)
       refid : string; (*for sanity-checking*)
     }[@@deriving show]
@@ -111,13 +120,16 @@ module LedgerEntry = struct
 
   let of_csv_row row =
     let open CCOption.Infix in
-    let r k = Csv.Row.find row k in
-    r "type" |> Typ.of_string >>= fun typ -> 
-    r "asset" |> Asset.of_string >>= fun asset -> 
-    let time = parse_time @@ r "time" in
-    let fee = Float.of_string @@ r "fee" in
-    let refid = r "refid" in
-    Some { time; typ; asset; fee; refid }
+    begin
+      let r k = Csv.Row.find row k in
+      r "type" |> Typ.of_string >>= fun typ -> 
+      r "asset" |> Asset.of_string >>= fun asset -> 
+      let time = parse_time @@ r "time" in
+      let amount = Float.of_string @@ r "amount" in
+      let fee = Float.of_string @@ r "fee" in
+      let refid = r "refid" in
+      Some { time; typ; asset; amount; fee; refid }
+    end |> CCOption.get_exn_or "Error parsing LedgerEntry"
   
 end
 
@@ -136,9 +148,9 @@ module Stats = struct
     wins : float;
     losses : float;
   }[@@deriving show]
-  
+
   type t = {
-    pair : Asset.t;
+    asset : Asset.t;
     yearly_results : yearly_result IntMap.t;
     buys_left : TradeEntry.t list;
   }[@@deriving show]
@@ -151,7 +163,7 @@ module Stats = struct
         Some { wins; losses }
     )
 
-  let calc ~pair ~(buys:TradeEntry.t list) ~sells =
+  let of_trades ~asset ~buys ~sells =
     let open TradeEntry.T in
     let rec aux acc sell =
       match acc.buys_left with
@@ -159,7 +171,7 @@ module Stats = struct
         (*Note: this can happen if staking gave extra volume*)
         Format.eprintf "WARNING: There is no buys left for %a - \
                         selling pot. staked volume %.2f eur\n%!"
-          Asset.pp pair
+          Asset.pp asset
           (sell.vol *. sell.price);
         let year = year_of_time sell.time in
         let wins, losses = sell.vol *. sell.price, 0. in
@@ -169,15 +181,9 @@ module Stats = struct
         in
         { acc with yearly_results }
       | buy :: buys_left ->
-        (*goto problem with staking:
-          * if selling more than buying, because of gains of staking
-            * then sells can 'overtake' buys
-              * which leads to this assertion to fail
-        *)
-        (* assert (Ptime.is_later sell.time ~than:buy.time); *)
         if Ptime.is_earlier sell.time ~than:buy.time then (
           Format.eprintf "WARNING: sell time (%a) is earlier than buy time (%a) \
-                          registering sell as win %a\n%!"
+                          -- registering sell as win %a\n%!"
             Ptime.pp sell.time 
             Ptime.pp buy.time 
             TradeEntry.pp buy;
@@ -224,47 +230,96 @@ module Stats = struct
     let buys_left =
       buys |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     in
-    let init = { pair; yearly_results = IntMap.empty; buys_left } in
+    let init = {
+      asset = asset;
+      yearly_results = IntMap.empty;
+      buys_left
+    } in
     sells
     |> CCList.sort (fun e e' -> Ptime.compare e.time e'.time)
     |> List.fold_left aux init
 
+  let add x y =
+    assert (x.asset = y.asset);
+    let asset = x.asset in
+    let buys_left = x.buys_left @ y.buys_left in
+    let yearly_results =
+      let f _year = function
+        | `Both (x_yres, y_yres) ->
+          let yres = {
+            wins = x_yres.wins +. y_yres.wins;
+            losses = x_yres.losses +. y_yres.losses;
+          } in
+          Some yres
+        | `Left yres -> Some yres
+        | `Right yres -> Some yres
+      in
+      IntMap.merge_safe ~f x.yearly_results y.yearly_results
+    in
+    { asset; yearly_results; buys_left }
+  
 end
+
+let add_stats_assetmaps =
+  let f _asset = function
+    | `Both (x_stats, y_stats) -> Some (Stats.add x_stats y_stats)
+    | `Left stats | `Right stats -> Some stats
+  in
+  Asset.Map.merge_safe ~f
+
+(*goto howto
+  * fold over ledger-entries
+    * accumulating over asset -> stats map
+      * accumulating over stats
+        * add all positive amounts to wins
+        * add all negative amounts to losses 
+        * subtract fees from corresponding wins/losses
+          * use refid for finding correspondents
+  * note: ledger-entries need to include `ZEUR as well as crypto asset
+*)
+let margin_stats_of_ledger ledger =
+  failwith "todo"
 
 let main () = 
   match Sys.argv |> Array.to_list |> CCList.drop 1 with
-  | trades_csv :: [] ->
-    let trade_entries = 
+  | trades_csv :: ledgers_csv :: [] ->
+    let trades_per_asset =
       trades_csv
       |> Csv.Rows.load ~has_header:true 
       |> List.map TradeEntry.of_csv_row
       |> List.filter (fun e -> e.margin = 0.)
       (*< Note: margin-trade gains should be calculated from ledger instead*)
-    in
-    let trade_entries_per_pair =
-      trade_entries
       |> List.fold_left (fun acc e ->
-        acc |> Asset.Map.update e.pair (function
+        acc |> Asset.Map.update e.asset (function
           | None -> Some [e]
           | Some es -> Some (e::es)
         )
       ) Asset.Map.empty
     in
-    trade_entries_per_pair |> Asset.Map.iter (fun pair trade_entries ->
-      (* begin *)
-      (*   Format.printf "\n\n----- Trade_Entries for %a\n%!" Pair.pp pair; *)
-      (*   trade_entries *)
-      (*   |> CCList.to_string TradeEntry.show *)
-      (*   |> print_endline *)
-      (* end; *)
-      let buys, sells =
-        trade_entries |> CCList.partition (fun e -> e.typ = `Buy)
-      in
-      let stats = Stats.calc ~pair ~buys ~sells in
-      Format.printf "\n%a\n%!" Stats.pp stats
-    )
+    let trades_stats =
+      trades_per_asset |> Asset.Map.mapi (fun asset trade_entries ->
+        let buys, sells =
+          trade_entries |> CCList.partition (fun e -> e.typ = `Buy)
+        in
+        Stats.of_trades ~asset ~buys ~sells
+      )
+    in
+    let ledger =
+      ledgers_csv
+      |> Csv.Rows.load ~has_header:true 
+      |> List.map LedgerEntry.of_csv_row
+    in
+    let margin_trades_stats = margin_stats_of_ledger ledger in
+    let all_stats = add_stats_assetmaps
+        trades_stats
+        margin_trades_stats
+    in
+    let pp_stats = Asset.Map.pp Asset.pp Stats.pp in
+    Format.printf "\ntrades stats = %a\n%!" pp_stats trades_stats;
+    Format.printf "\nmargin trades stats = %a\n%!" Stats.pp margin_trades_stats;
+    Format.printf "\nsummed stats = %a\n%!" pp_stats all_stats
   | _ ->
-    Printf.eprintf "Usage: %s <csv> <year|'all'> <pair|'all'>" (Sys.argv.(0));
+    Printf.eprintf "Usage: %s <trades.csv> <ledgers.csv>" (Sys.argv.(0));
     exit 1
 
 let () = main ()

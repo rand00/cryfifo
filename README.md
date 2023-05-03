@@ -43,6 +43,12 @@ Make issues/PRs on this repository if you want support for something else
 First you need to [install the OCaml package manager](https://opam.ocaml.org/doc/Install.html)
 `opam`.
 
+Initially setup opam:
+```
+opam init
+opam switch create 4.14.0
+```
+
 Clone repo:
 ```
 git clone https://github.com/rand00/cryfifo.git
@@ -51,7 +57,7 @@ cd cryfifo
 
 Install dependencies:
 ```
-opam install csv ptime containers ppx_deriving
+opam install dune csv ptime containers ppx_deriving
 ```
 
 Compile:

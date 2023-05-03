@@ -8,6 +8,12 @@ Specifically this program was written to support registering wins & losses for
 [taxation in Denmark](https://www.kraken.com/), 
 based on csv exports from [Kraken](https://www.kraken.com/).
 
+## Usage
+
+```
+cryfifo <TRADES.CSV> <LEDGER.CSV>
+```
+
 ## Features
 
 * supports CSV exports from Kraken, you need to supply both a `trades.csv` and `ledger.csv`
@@ -32,9 +38,27 @@ Currently only supports
 
 Make issues/PRs on this repository if you want support for something else
 
-## Usage
+## Compiling
 
+Clone repo:
 ```
-cryfifo <TRADES.CSV> <LEDGER.CSV>
+git clone https://github.com/rand00/cryfifo.git
+cd cryfifo
 ```
+
+Install dependencies:
+```
+opam install csv ptime containers ppx_deriving
+```
+
+Compile:
+```
+dune build
+```
+
+Copy the resulting binary somewhere in your `PATH`:
+```
+cp ./_build/default/bin/cryfifo.exe ~/bin/cryfifo
+```
+
 

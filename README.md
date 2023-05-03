@@ -40,6 +40,9 @@ Make issues/PRs on this repository if you want support for something else
 
 ## Compiling
 
+First you need to [install the OCaml package manager](https://opam.ocaml.org/doc/Install.html)
+`opam`.
+
 Clone repo:
 ```
 git clone https://github.com/rand00/cryfifo.git

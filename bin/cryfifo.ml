@@ -7,7 +7,11 @@ let parse_time str =
   let [ y; m; d ] = split '-' date_str in
   let date = int y, int m, int d in
   let [ h; m; s ] = split ':' time_str in
-  let [ s; _ ] = split '.' s in
+  let s = match split '.' s with
+    | s :: [] 
+    | s :: _ :: [] -> s
+    | _ -> failwith "parse_time: Failed parsing seconds"
+  in
   let tz = 0 in 
   let time = int h, int m, int s in
   Ptime.of_date_time (date, (time, tz))
@@ -110,8 +114,8 @@ module LedgerEntry = struct
       time : Ptime.t;
       typ : Typ.t;
       asset : Asset.t;
-      amount : float; (*eur*)
-      fee : float; (*eur*)
+      amount : float;
+      fee : float;
       refid : string; (*for sanity-checking*)
     }[@@deriving show]
 
@@ -120,22 +124,26 @@ module LedgerEntry = struct
 
   let of_csv_row row =
     let open CCOption.Infix in
-    begin
-      let r k = Csv.Row.find row k in
-      r "type" |> Typ.of_string >>= fun typ -> 
-      r "asset" |> Asset.of_string >>= fun asset -> 
-      let time = parse_time @@ r "time" in
-      let amount = Float.of_string @@ r "amount" in
-      let fee = Float.of_string @@ r "fee" in
-      let refid = r "refid" in
-      Some { time; typ; asset; amount; fee; refid }
-    end |> CCOption.get_exn_or "Error parsing LedgerEntry"
+    let r k = Csv.Row.find row k in
+    r "type" |> Typ.of_string >>= fun typ -> 
+    r "asset" |> Asset.of_string >>= fun asset -> 
+    let time = parse_time @@ r "time" in
+    let amount = Float.of_string @@ r "amount" in
+    let fee = Float.of_string @@ r "fee" in
+    let refid = r "refid" in
+    Some { time; typ; asset; amount; fee; refid }
   
 end
 
+(*Hmm - needed for printing maps properly*)
+let pp_start x () = Format.fprintf x "@[<v 4>    "
+let pp_arrow x () = Format.fprintf x " -> @["
+let pp_sep x () = Format.fprintf x ";@]@,"
+let pp_stop x () = Format.fprintf x "@]@]"
+
 module IntMap = struct
   include CCMap.Make(CCInt)
-  let pp pp_v = pp CCInt.pp pp_v
+  let pp pp_v = pp ~pp_start ~pp_sep ~pp_arrow ~pp_stop CCInt.pp pp_v
 end
 
 let year_of_time t =
@@ -144,16 +152,21 @@ let year_of_time t =
 
 module Stats = struct 
 
-  type yearly_result = {
-    wins : float;
-    losses : float;
-  }[@@deriving show]
+  module T = struct 
 
-  type t = {
-    asset : Asset.t;
-    yearly_results : yearly_result IntMap.t;
-    buys_left : TradeEntry.t list;
-  }[@@deriving show]
+    type yearly_result = {
+      wins : float;
+      losses : float;
+    }[@@deriving show]
+
+    type t = {
+      asset : Asset.t;
+      yearly_results : yearly_result IntMap.t;
+      buys_left : TradeEntry.t list;
+    }[@@deriving show]
+
+  end
+  include T
 
   let update_yearly_results ~year ~wins ~losses v =
     v |> IntMap.update year (function
@@ -163,6 +176,7 @@ module Stats = struct
         Some { wins; losses }
     )
 
+  (*Warning; depends on margin-trades being filtered away*)
   let of_trades ~asset ~buys ~sells =
     let open TradeEntry.T in
     let rec aux acc sell =
@@ -267,26 +281,87 @@ let add_stats_assetmaps =
   in
   Asset.Map.merge_safe ~f
 
-(*goto howto
-  * fold over ledger-entries
-    * accumulating over asset -> stats map
-      * accumulating over stats
-        * add all positive amounts to wins
-        * add all negative amounts to losses 
-        * subtract fees from corresponding wins/losses
-          * use refid for finding correspondents
-  * note: ledger-entries need to include `ZEUR as well as crypto asset
-*)
-let margin_stats_of_ledger ledger =
-  failwith "todo"
+let to_eur ~asset ~time ~trades amount =
+  if asset = `ZEUR then amount else 
+    let closest_trade = 
+      trades |> List.fold_left (fun acc_closest_trade trade ->
+        match acc_closest_trade with
+        | None ->
+          if not (trade.TradeEntry.asset = asset) then
+            None
+          else 
+            Some trade
+        | Some acc_closest_trade -> 
+          if not (trade.TradeEntry.asset = asset) then
+            Some acc_closest_trade
+          else
+            let diff_acc = Ptime.diff acc_closest_trade.time time |> Ptime.Span.abs in
+            let diff_trade = Ptime.diff trade.time time |> Ptime.Span.abs in
+            if Ptime.Span.compare diff_trade diff_acc < 0 then
+              Some trade
+            else
+              Some acc_closest_trade
+      ) None
+    in
+    match closest_trade with
+    | Some t -> t.price *. amount
+    | None ->
+      Format.eprintf "ERROR: to_eur: No trade found of asset %a" Asset.pp asset;
+      exit 1
+
+(*> Warning; this depends on ledger only containing `Margin and `Rollover entries*)
+let margin_stats_of_ledger trades ledger : Stats.t Asset.Map.t =
+  let open Stats.T in
+  let open LedgerEntry.T in
+  let calc_wins_losses asset ledger_entry =
+    let time = ledger_entry.time in
+    let amount_eur = ledger_entry.amount |> to_eur ~asset ~time ~trades in
+    let fee_eur = ledger_entry.fee |> to_eur ~asset ~time ~trades in
+    let wins = if amount_eur > 0. then amount_eur else 0. in
+    let losses =
+      (*goto possibly subtract fees from wins instead - test effect
+        .. see what danish SKAT says about this
+      *)
+      (if amount_eur <= 0. then -. amount_eur else 0.) +. fee_eur
+    in
+    { wins; losses }
+  in
+  ledger
+  |> List.fold_left (fun acc_asset_map ledger_entry ->
+    let asset = ledger_entry.LedgerEntry.asset in
+    acc_asset_map
+    |> Asset.Map.update asset (function
+      | None ->
+        let yres = calc_wins_losses asset ledger_entry in
+        let yearly_results =
+          IntMap.singleton (year_of_time ledger_entry.time) yres
+        in
+        Some { asset; yearly_results; buys_left = [] }
+      | Some stats ->
+        let res = calc_wins_losses asset ledger_entry in
+        let yearly_results =
+          IntMap.update (year_of_time ledger_entry.time) (function
+            | None -> Some res
+            | Some yres ->
+              let wins = res.wins +. yres.wins in
+              let losses = res.losses +. yres.losses in
+              Some { wins; losses }
+          ) stats.yearly_results
+        in
+        Some { stats with yearly_results }
+    )
+  ) Asset.Map.empty
 
 let main () = 
   match Sys.argv |> Array.to_list |> CCList.drop 1 with
   | trades_csv :: ledgers_csv :: [] ->
-    let trades_per_asset =
+    let trades =
       trades_csv
       |> Csv.Rows.load ~has_header:true 
       |> List.map TradeEntry.of_csv_row
+    in
+    let trades_per_asset =
+      trades
       |> List.filter (fun e -> e.margin = 0.)
       (*< Note: margin-trade gains should be calculated from ledger instead*)
       |> List.fold_left (fun acc e ->
@@ -307,19 +382,132 @@ let main () =
     let ledger =
       ledgers_csv
       |> Csv.Rows.load ~has_header:true 
-      |> List.map LedgerEntry.of_csv_row
+      |> List.filter_map LedgerEntry.of_csv_row
     in
-    let margin_trades_stats = margin_stats_of_ledger ledger in
+    let margin_trades_stats = margin_stats_of_ledger trades ledger in
     let all_stats = add_stats_assetmaps
         trades_stats
         margin_trades_stats
     in
-    let pp_stats = Asset.Map.pp Asset.pp Stats.pp in
-    Format.printf "\ntrades stats = %a\n%!" pp_stats trades_stats;
-    Format.printf "\nmargin trades stats = %a\n%!" Stats.pp margin_trades_stats;
-    Format.printf "\nsummed stats = %a\n%!" pp_stats all_stats
+    let pp_stats = Asset.Map.pp ~pp_start ~pp_sep ~pp_arrow ~pp_stop
+        Asset.pp Stats.pp in
+    Format.printf "\n@[trades@ stats@ =@]@,%a@." pp_stats trades_stats;
+    Format.printf "\n@[margin@ trades@ stats@ =@]@,%a@." pp_stats margin_trades_stats;
+    Format.printf "\n@[summed stats@ =@]@,%a@." pp_stats all_stats;
+    print_endline "\nyearly summed wins/losses per asset:";
+    all_stats |> Asset.Map.iter (fun asset stats ->
+      Format.printf "    %a\n%!" Asset.pp asset;
+      stats.Stats.T.yearly_results |> IntMap.iter (fun year yres ->
+        Format.printf "        %d -> %.4f eur\n%!"
+          year (yres.Stats.T.wins -. yres.losses)
+      );
+    );
+    let yearly_wins_losses = 
+      let open Stats.T in
+      Asset.Map.fold (fun asset stats acc ->
+        IntMap.fold (fun year yres acc ->
+          IntMap.update year (function
+            | None -> Some yres
+            | Some acc_yres ->
+              let acc_yres = {
+                wins = acc_yres.wins +. yres.wins;
+                losses = acc_yres.losses +. yres.losses;
+              } in
+              Some acc_yres
+          ) acc
+        ) stats.Stats.T.yearly_results acc
+      ) all_stats IntMap.empty
+    in
+    Format.printf "\nyearly@ wins/losses@ =@ @,%a@."
+      (IntMap.pp Stats.pp_yearly_result) yearly_wins_losses;
+    let yearly_summed_wins_losses = 
+      let open Stats.T in
+      Asset.Map.fold (fun asset stats acc ->
+        IntMap.fold (fun year yres acc ->
+          IntMap.update year (function
+            | None ->
+              let sum = yres.wins -. yres.losses in
+              Some sum
+            | Some acc_sum ->
+              let acc_sum = acc_sum +. (yres.wins -. yres.losses) in
+              Some acc_sum
+          ) acc
+        ) stats.Stats.T.yearly_results acc
+      ) all_stats IntMap.empty
+    in
+    let pp_yearly_sums =
+      let pp_float f = Format.fprintf f "%.4f" in
+      IntMap.pp (* ~pp_start ~pp_sep ~pp_arrow ~pp_stop *) pp_float in
+    Format.printf "\nyearly@ summed@ wins/losses@ =@ @,%a@."
+      pp_yearly_sums yearly_summed_wins_losses;
+    let summed_wins_losses =
+      Asset.Map.fold (fun asset stats acc ->
+        IntMap.fold (fun year yres acc ->
+          acc +. yres.Stats.T.wins -. yres.Stats.T.losses
+        ) stats.Stats.T.yearly_results acc
+      ) all_stats 0.
+    in
+    Format.printf "\ntotal summed wins/losses = %.4f eur\n%!"
+      summed_wins_losses;
+    let calc_danish_tax_negtax yres =
+      let danish_max_tax = 0.53 in
+      let tax = danish_max_tax *. yres.Stats.T.wins in
+      let neg_tax =
+        (*> 6600 dkk = 880 eur, see https://skat.dk/data.aspx?oid=2237057&year=2022&layout=2503*)
+        if yres.Stats.T.losses > 880. then
+          0.26 *. (yres.Stats.T.losses -. 880.)
+        else
+          0.
+      in
+      tax, neg_tax
+    in
+    let yearly_summed_tax_negtax =
+      Asset.Map.fold (fun asset stats acc ->
+        IntMap.fold (fun year yres acc ->
+          let tax, neg_tax = calc_danish_tax_negtax yres in
+          acc |> IntMap.update year (function
+            | None -> 
+              Some (tax -. neg_tax)
+            | Some acc_eur -> 
+              Some (acc_eur +. tax -. neg_tax)
+          )
+        ) stats.Stats.T.yearly_results acc
+      ) all_stats IntMap.empty
+    in
+    Format.printf "\nyearly summed tax/deduction = @,%a@."
+      pp_yearly_sums yearly_summed_tax_negtax;
+    let yearly_taxrate_equivalent =
+      IntMap.mapi (fun year summed_wins_losses ->
+        if summed_wins_losses = 0. then 0. else 
+          let taxrate =
+            IntMap.get_or ~default:0. year yearly_summed_tax_negtax
+            /. summed_wins_losses
+          in
+          taxrate *. 100.
+        ) yearly_summed_wins_losses
+    in
+    Format.printf "\nyearly taxrate equivalent = @,%a@."
+      pp_yearly_sums yearly_taxrate_equivalent;
+    let summed_tax_negtax =
+      Asset.Map.fold (fun asset stats acc ->
+        IntMap.fold (fun year yres acc ->
+          let tax, neg_tax = calc_danish_tax_negtax yres in
+          acc +. tax -. neg_tax
+        ) stats.Stats.T.yearly_results acc
+      ) all_stats 0.
+    in
+    Format.printf "\ntotal summed tax/deduction = %.4f eur\n%!"
+      summed_tax_negtax;
+    print_newline ();
+    print_endline "NOTE: Wins/losses are calculated via the FIFO method";
+    print_endline "NOTE: Tax-rate is set to the danish max of 53%";
+    print_endline "NOTE: Deduction first subtracts 800. eur from losses (danish law)";
+    print_endline "NOTE: Deduction-rate on losses is set to the danish 26%";
+    print_newline ();
   | _ ->
-    Printf.eprintf "Usage: %s <trades.csv> <ledgers.csv>" (Sys.argv.(0));
+    Printf.eprintf "Usage: %s <trades.csv> <ledgers.csv>\n%!" (
+      Filename.basename Sys.argv.(0)
+    );
     exit 1
 
 let () = main ()

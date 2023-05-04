@@ -52,6 +52,8 @@ Currently only supports
 * trades between some crypto asset and euro - not between crypto-assets
 * a limited set of assets: ada, xtz, zec
 * asset/eur conversion-rates are estimated from the nearest trade in time from `trades.csv`
+* *warning*: there is no special handling of asset-transfers (i.e. not being a *buy*) to your account
+  * this means that the FIFO calculation in this case can be using the wrong price-basis
 
 Make issues/PRs on this repository if you want support for something else.
 

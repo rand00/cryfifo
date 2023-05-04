@@ -1,5 +1,8 @@
 # `cryfifo`
 
+*Note that I take no responsibility for your use of this program in any way. 
+That said, I have used it myself and trust the calculations.*
+
 The name stems from
 * crying over the FIFO way 
 * crypto wins & losses calculated the FIFO way 

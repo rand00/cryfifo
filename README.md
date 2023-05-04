@@ -8,6 +8,9 @@ Specifically this program was written to support registering wins & losses for
 [taxation in Denmark](https://www.kraken.com/), 
 based on csv exports from [Kraken](https://www.kraken.com/).
 
+Note that as FIFO method is stateful, you need to supply the trade/ledger histories from 
+the beginning of time - or at least since last time you had no asset at all.
+
 ## Usage
 
 ```

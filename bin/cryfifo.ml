@@ -360,9 +360,12 @@ let main () =
       |> Csv.Rows.load ~has_header:true 
       |> List.map TradeEntry.of_csv_row
     in
-    let trades_per_asset =
+    let trades_without_margins = 
       trades
       |> List.filter (fun e -> e.margin = 0.)
+    in
+    let trades_per_asset =
+      trades_without_margins
       (*< Note: margin-trade gains should be calculated from ledger instead*)
       |> List.fold_left (fun acc e ->
         acc |> Asset.Map.update e.asset (function
